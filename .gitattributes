@@ -1,0 +1,8 @@
+# Byte-exact test inputs: a checkout must never convert their line endings,
+# which would move the offsets a PDF's cross-reference table points at.
+*.pdf binary
+*.mark binary
+*.note binary
+*.rm binary
+*.png binary
+*.jpg binary

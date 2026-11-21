@@ -1,0 +1,24 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(SNNote 1.0 CONFIG)
+find_dependency(ZLIB)
+if(@SNR_CONFIG_FIND_SPD@)
+    find_dependency(SNSpd 1.0 CONFIG)
+endif()
+# Static installs expose PDFium as a link dependency. Shared installs leave
+# its link-time and runtime search paths to the consumer's deployment setup.
+if(@SNR_CONFIG_FIND_PDFIUM@)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_dependency(PDFium MODULE)
+endif()
+if(@SNR_CONFIG_CAIRO@)
+    find_dependency(PkgConfig)
+    find_dependency(ZLIB)
+    pkg_check_modules(SNR_CAIRO REQUIRED IMPORTED_TARGET cairo>=1.18 cairo-ft freetype2 gdk-pixbuf-2.0)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/SNRenderTargets.cmake")
+check_required_components(SNRender)

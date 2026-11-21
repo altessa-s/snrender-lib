@@ -1,0 +1,91 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+name: Fuzz
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    # Each target gets its own job and the full half hour fuzz_render had
+    # alone, so adding the PDF target takes no effort from the notebook one.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [render, pdf]
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update
+      - run: apt-get install -y clang libclang-rt-19-dev cmake ninja-build pkg-config git python3 ca-certificates libcairo2-dev libfreetype-dev libgdk-pixbuf-2.0-dev zlib1g-dev
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: python3 scripts/fetch-pdfium.py --platform linux-x64 --output build/pdfium
+      # -O1 makes each sanitized page composition about six times faster than
+      # the unoptimized default, the usual level for libFuzzer builds.
+      - run: cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang -DSNRENDER_READER_SOURCE="$GITHUB_WORKSPACE/build/reader" -DSNRENDER_BUILD_FUZZERS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DPDFium_ROOT="$GITHUB_WORKSPACE/build/pdfium" -DSNRENDER_BUILD_TESTS=OFF -DSNRENDER_BUILD_TOOLS=OFF -DCMAKE_C_FLAGS="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all" -DSNRENDER_ENABLE_SPD=ON -DSNRENDER_SPD_SOURCE="$GITHUB_WORKSPACE/build/spd"
+      - if: matrix.target == 'render'
+        run: cmake --build build/fuzz --target fuzz_render fuzz_seeds
+      - if: matrix.target == 'render'
+        run: mkdir -p build/corpus
+      - if: matrix.target == 'render'
+        run: build/fuzz/fuzz_seeds build/corpus tests/data/layer.png tests/data/layer.jpg
+      - if: matrix.target == 'render'
+        run: python3 tests/generate_spd.py build/spd-seeds
+      - if: matrix.target == 'render'
+        run: cp build/spd-seeds/*.spd build/corpus/
+      # libFuzzer mutates an input at its own size, so megabyte fixtures in the
+      # corpus make every descendant a megabyte: a half-hour run then reaches
+      # 21 executions a second and a 733 MB corpus. Only fixtures of at most
+      # 256 KiB are mutated; the larger ones are replayed through the same
+      # target by the fuzz_replay tests of the ordinary suites.
+      # find accepts '+' only directly after '{}', so the destination goes first.
+      - if: matrix.target == 'render'
+        run: find tests/fixtures -type f -name '*.note' -size -257k -exec cp -t build/corpus '{}' '+'
+      - if: matrix.target == 'render'
+        run: find tests/fixtures -type f -name '*.mark' -size -257k -exec cp -t build/corpus '{}' '+'
+      # One execution composes at most four pages, measured below 0.4 s;
+      # -timeout leaves room for a slower runner while still reporting a hang
+      # within seconds.
+      - if: matrix.target == 'render'
+        run: build/fuzz/fuzz_render build/corpus -max_total_time=1800 -max_len=1048576 -timeout=10 -print_final_stats=1 -artifact_prefix=build/
+      - if: matrix.target == 'pdf'
+        run: cmake --build build/fuzz --target fuzz_pdf fuzz_pdf_seed
+      - if: matrix.target == 'pdf'
+        run: mkdir -p build/pdf-corpus
+      - if: matrix.target == 'pdf'
+        run: build/fuzz/fuzz_pdf_seed --seed build/pdf-corpus/blank.pdf
+      # Seeds with annotation appearances reach the preview rewrite.
+      - if: matrix.target == 'pdf'
+        run: cp tests/data/pdf-seeds/*.pdf build/pdf-corpus
+      - if: matrix.target == 'pdf'
+        run: build/fuzz/fuzz_pdf build/pdf-corpus -max_total_time=1800 -max_len=1048576 -timeout=10 -print_final_stats=1 -artifact_prefix=build/
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-failures-${{ matrix.target }}
+          # libFuzzer names an input by what it found: a crash, a leak, a
+          # timeout, an out-of-memory or a slow unit.
+          path: |
+            build/crash-*
+            build/leak-*
+            build/timeout-*
+            build/oom-*
+            build/slow-unit-*

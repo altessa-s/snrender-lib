@@ -1,0 +1,228 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+# Version tags publish installed static libraries, headers, CMake/pkg-config
+# files and the tool plus LICENSE, COPYRIGHT and README for three platforms.
+# Apple is used on macOS; Cairo with PDFium previews on Linux and Windows.
+# Reader, Cairo, FreeType, GdkPixbuf, zlib and PDFium are not bundled.
+# The header version and the GCC 15 build must pass before publication.
+name: Release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.header.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: header
+        run: |
+          version="$(python3 tests/check_version.py "$GITHUB_REF_NAME")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  gcc15:
+    needs: verify
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: ubuntu-24.04
+    container: gcc:15
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 tests/check_version.py "$GITHUB_REF_NAME"
+      - run: apt-get update
+      - run: apt-get install -y git ca-certificates python3 cmake ninja-build pkg-config libcairo2-dev libfreetype-dev libgdk-pixbuf-2.0-dev libpng-dev libpoppler-glib-dev zlib1g-dev poppler-utils fonts-noto-cjk python3-pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform linux-x64 --output build/pdfium
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DCMAKE_C_COMPILER=gcc -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DCMAKE_C_COMPILER=gcc -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+  package_apple:
+    needs: verify
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - run: brew install llvm ninja freetype cairo gdk-pixbuf poppler
+      # The PDF object checks read compressed object streams through pypdf.
+      - run: python3 -m pip install --break-system-packages pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform "mac-$(uname -m | sed 's/x86_64/x64/')" --output build/pdfium
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DBUILD_SHARED_LIBS=OFF -DSNRENDER_BUILD_CAIRO=OFF -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - name: Stage installed files
+        run: |
+          cmake --install build/release --prefix "$PWD/build/stage"
+          cp LICENSE COPYRIGHT README.md build/stage/
+      - name: Archive
+        run: python3 scripts/package-release.py "${{ needs.verify.outputs.version }}" macos-arm64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64
+          path: build/dist/*
+          if-no-files-found: error
+  package_linux:
+    needs: verify
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update
+      - run: apt-get install -y clang libclang-rt-19-dev cmake ninja-build pkg-config python3 ca-certificates git libcairo2-dev libfreetype-dev libgdk-pixbuf-2.0-dev libpng-dev libpoppler-glib-dev zlib1g-dev poppler-utils fonts-noto-cjk python3-pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform linux-x64 --output build/pdfium
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DCMAKE_C_COMPILER=clang -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DCMAKE_C_COMPILER=clang -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DBUILD_SHARED_LIBS=OFF -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - name: Stage installed files
+        run: |
+          cmake --install build/release --prefix "$PWD/build/stage"
+          cp LICENSE COPYRIGHT README.md build/stage/
+      - name: Archive
+        run: python3 scripts/package-release.py "${{ needs.verify.outputs.version }}" linux-x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          path: build/dist/*
+          if-no-files-found: error
+  package_windows:
+    needs: verify
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-cairo
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-gdk-pixbuf2
+            mingw-w64-ucrt-x86_64-poppler
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            git
+      # The PDF object checks read compressed object streams through pypdf.
+      - run: python3 -m pip install --break-system-packages pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform win-x64 --output build/pdfium
+      - run: cygpath -w "$PWD/build/pdfium/bin" >> "$GITHUB_PATH"
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      # CMake otherwise prefers a Python from the Windows registry, which is
+      # not the MSYS2 one that pip installed pypdf into.
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/build/install" -DBUILD_SHARED_LIBS=OFF -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DPython3_EXECUTABLE="$(cygpath -m "$(command -v python3)")" -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - name: Stage installed files
+        run: |
+          cmake --install build/release --prefix "$PWD/build/stage"
+          cp LICENSE COPYRIGHT README.md build/stage/
+      - name: Archive
+        run: python3 scripts/package-release.py "${{ needs.verify.outputs.version }}" windows-x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: build/dist/*
+          if-no-files-found: error
+  publish:
+    permissions:
+      contents: write
+    needs: [verify, gcc15, package_apple, package_linux, package_windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: build/dist
+          merge-multiple: true
+      - name: Publish archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/dist/* --title "snrender ${{ needs.verify.outputs.version }}" --generate-notes --verify-tag

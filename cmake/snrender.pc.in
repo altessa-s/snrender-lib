@@ -1,0 +1,15 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+prefix=${pcfiledir}/@SNR_PC_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+Name: snrender
+Description: Supernote notebook rendering
+Version: @PROJECT_VERSION@
+Requires: snnote
+Requires.private: @SNR_PC_SPD@ @SNR_PC_REQUIRES@
+Libs: -L${libdir} -lsnrender
+Libs.private: @SNR_PC_PRIVATE@
+Cflags: -I${includedir}@SNR_PC_CFLAGS@

@@ -1,0 +1,204 @@
+# Copyright 2026 ALTESSA SOLUTIONS INC.
+# Use of this source code is governed by an MIT-style license that can be
+# found in the LICENSE file.
+
+name: C23
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  apple:
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: ["ON", "OFF"]
+        cairo: ["ON", "OFF"]
+    steps:
+      - uses: actions/checkout@v7
+      - run: brew install llvm ninja freetype cairo gdk-pixbuf poppler
+      # The PDF object checks read compressed object streams through pypdf.
+      - run: python3 -m pip install --break-system-packages pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform "mac-$(uname -m | sed 's/x86_64/x64/')" --output build/pdfium
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DSNRENDER_BUILD_CAIRO=${{ matrix.cairo }} -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - if: matrix.shared == 'ON'
+        run: python3 tests/check_exports.py build/release/libsnrender.dylib 37
+      - run: cmake --install build/release --prefix "$GITHUB_WORKSPACE/build/install"
+      - if: matrix.shared == 'ON'
+        run: echo "PDFium_ROOT=" >> "$GITHUB_ENV"
+      - run: cmake -S tests/installed_consumer -B build/consumer -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DSNRENDER_CONSUMER_SPD=ON
+      - run: cmake --build build/consumer
+      - run: DYLD_LIBRARY_PATH="$PWD/build/pdfium/lib:$DYLD_LIBRARY_PATH" build/consumer/consumer
+      - run: cmake -S . -B build/asan -G Ninja -DPDFium_ROOT="$GITHUB_WORKSPACE/build/pdfium" -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DCMAKE_BUILD_TYPE=Debug -DSNRENDER_READER_SOURCE="$GITHUB_WORKSPACE/build/reader" -DSNRENDER_BUILD_CAIRO=${{ matrix.cairo }} -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" -DCMAKE_OBJC_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" -DSNRENDER_ENABLE_SPD=ON -DSNRENDER_SPD_SOURCE="$GITHUB_WORKSPACE/build/spd"
+      - run: cmake --build build/asan --target all check
+      - name: Verify disabled Atelier support
+        run: cmake -S . -B build/no-spd -G Ninja -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" -DSNRENDER_READER_SOURCE="$GITHUB_WORKSPACE/build/reader" -DSNRENDER_ENABLE_SPD=OFF -DSNRENDER_BUILD_TOOLS=OFF -DSNRENDER_WERROR=ON
+      - run: cmake --build build/no-spd --target test_spd
+      - run: ctest --test-dir build/no-spd -R '^spd$' --output-on-failure --no-tests=error
+  linux:
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: ["ON", "OFF"]
+        pdfium: ["ON", "OFF"]
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update
+      - run: apt-get install -y clang libclang-rt-19-dev cmake ninja-build pkg-config python3 ca-certificates git libcairo2-dev libfreetype-dev libgdk-pixbuf-2.0-dev libpng-dev libpoppler-glib-dev zlib1g-dev poppler-utils fonts-noto-cjk python3-pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform linux-x64 --output build/pdfium
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DCMAKE_C_COMPILER=clang -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DCMAKE_C_COMPILER=clang -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=${{ matrix.pdfium }} -DSNRENDER_REQUIRE_OVERLAY_TESTS=${{ matrix.pdfium }} -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - if: matrix.shared == 'ON'
+        run: python3 tests/check_exports.py build/release/libsnrender.so 37
+      - run: cmake --install build/release --prefix "$GITHUB_WORKSPACE/build/install"
+      - if: matrix.shared == 'ON'
+        run: echo "PDFium_ROOT=" >> "$GITHUB_ENV"
+      # The shared package does not embed the SDK path. GNU ld needs its
+      # transitive dependency directory independently of the runtime loader.
+      - run: cmake -S tests/installed_consumer -B build/consumer -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$PWD/build/pdfium/lib" -DSNRENDER_CONSUMER_SPD=ON
+      - run: cmake --build build/consumer
+      - run: LD_LIBRARY_PATH="$PWD/build/pdfium/lib:$LD_LIBRARY_PATH" build/consumer/consumer
+      # A build that never sets BUILD_SHARED_LIBS is static; its installed
+      # package must still find PDFium for the consumer.
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: cmake -S . -B build/default-static -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/install" -DSNRENDER_BUILD_TESTS=OFF -DSNRENDER_BUILD_TOOLS=OFF -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_ENABLE_SPD=ON
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: cmake --build build/default-static
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: cmake --install build/default-static --prefix "$GITHUB_WORKSPACE/build/default-install"
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: cmake -S tests/installed_consumer -B build/default-consumer -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/build/default-install;$GITHUB_WORKSPACE/build/install" -DSNRENDER_CONSUMER_SPD=ON
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: cmake --build build/default-consumer
+      - if: matrix.shared == 'OFF' && matrix.pdfium == 'ON'
+        run: LD_LIBRARY_PATH="$PWD/build/pdfium/lib:$LD_LIBRARY_PATH" build/default-consumer/consumer
+      - run: cmake -S . -B build/asan -G Ninja -DPDFium_ROOT="$GITHUB_WORKSPACE/build/pdfium" -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug -DSNRENDER_READER_SOURCE="$GITHUB_WORKSPACE/build/reader" -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=${{ matrix.pdfium }} -DSNRENDER_REQUIRE_OVERLAY_TESTS=${{ matrix.pdfium }} -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" -DSNRENDER_ENABLE_SPD=ON -DSNRENDER_SPD_SOURCE="$GITHUB_WORKSPACE/build/spd"
+      - run: cmake --build build/asan --target all check
+      - name: Verify disabled Atelier support
+        run: cmake -S . -B build/no-spd -G Ninja -DCMAKE_C_COMPILER=clang -DSNRENDER_READER_SOURCE="$GITHUB_WORKSPACE/build/reader" -DSNRENDER_ENABLE_SPD=OFF -DSNRENDER_BUILD_TOOLS=OFF -DSNRENDER_WERROR=ON
+      - run: cmake --build build/no-spd --target test_spd
+      - run: ctest --test-dir build/no-spd -R '^spd$' --output-on-failure --no-tests=error
+  windows:
+    env:
+      PDFium_ROOT: ${{ github.workspace }}/build/pdfium
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: ["ON", "OFF"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-cairo
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-gdk-pixbuf2
+            mingw-w64-ucrt-x86_64-poppler
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            git
+      # The PDF object checks read compressed object streams through pypdf.
+      - run: python3 -m pip install --break-system-packages pypdf
+      - run: python3 scripts/fetch-pdfium.py --platform win-x64 --output build/pdfium
+      - run: cygpath -w "$PWD/build/pdfium/bin" >> "$GITHUB_PATH"
+      - run: pkg-config --modversion cairo
+      - id: reader
+        run: python3 tests/reader_commit.py >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snnote-lib
+          ref: ${{ steps.reader.outputs.commit }}
+          persist-credentials: false
+          path: build/reader
+      - uses: actions/checkout@v7
+        with:
+          repository: altessa-s/snspd-lib
+          ref: ${{ steps.reader.outputs.spd_commit }}
+          persist-credentials: false
+          path: build/spd
+      - run: cmake -S build/reader -B build/reader-build -G Ninja -DSNNOTE_BUILD_TESTS=OFF -DSNNOTE_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/build/install"
+      - run: cmake -S build/spd -B build/spd-build -G Ninja -DSNSPD_BUILD_TESTS=OFF -DSNSPD_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/build/install"
+      - run: cmake --build build/reader-build --target install
+      - run: cmake --build build/spd-build --target install
+      # CMake otherwise prefers a Python from the Windows registry, which is
+      # not the MSYS2 one that pip installed pypdf into.
+      - run: cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PWD/build/install" -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DSNRENDER_WERROR=ON -DSNRENDER_REQUIRE_PDF_TESTS=ON -DSNRENDER_ENABLE_PDFIUM=ON -DSNRENDER_REQUIRE_OVERLAY_TESTS=ON -DPython3_EXECUTABLE="$(cygpath -m "$(command -v python3)")" -DSNRENDER_ENABLE_SPD=ON
+      - run: cmake --build build/release --target all check
+      - run: ctest --test-dir build/release -R "^links$" --output-on-failure --no-tests=error
+      - run: cmake --install build/release --prefix "$PWD/build/install"
+      - if: matrix.shared == 'ON'
+        run: echo "PDFium_ROOT=" >> "$GITHUB_ENV"
+      - run: cmake -S tests/installed_consumer -B build/consumer -G Ninja -DCMAKE_PREFIX_PATH="$PWD/build/install" -DSNRENDER_CONSUMER_SPD=ON
+      - run: cmake --build build/consumer
+      - run: PATH="$PWD/build/pdfium/bin:$PWD/build/install/bin:$PATH" build/consumer/consumer
+      - name: Verify disabled Atelier support
+        run: cmake -S . -B build/no-spd -G Ninja -DSNRENDER_READER_SOURCE="$PWD/build/reader" -DSNRENDER_ENABLE_SPD=OFF -DSNRENDER_BUILD_TOOLS=OFF -DSNRENDER_WERROR=ON -DPython3_EXECUTABLE="$(cygpath -m "$(command -v python3)")"
+      - run: cmake --build build/no-spd --target test_spd
+      - run: ctest --test-dir build/no-spd -R '^spd$' --output-on-failure --no-tests=error
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python3 -m pip install clang-format==21.1.8
+      - run: git ls-files '*.c' '*.h' '*.m' | xargs clang-format --dry-run --Werror
