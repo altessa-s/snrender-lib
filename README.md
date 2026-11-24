@@ -275,32 +275,39 @@ Very long words require `pdftotext -raw` to avoid Poppler's duplicate-text
 suppression; the default geometric extraction can omit repeated characters.
 For recognition with explicit unboxed space/newline words, both backends consume
 line boundaries in model order. Each recognized line prefers a shared baseline,
-and the element uses a common height based on clipped word boxes. An isolated
-tallest box more than 1.4 times the next tallest is excluded before computing
-the mean, so a lone tall outlier cannot enlarge other lines. Two taller boxes
-still support a normal height among majority punctuation or slivers. The remaining
-boxes at least a quarter of their initial mean height determine the height:
-their mean, capped at 1.4
-times their minimum, with a floor of half their mean. Even a majority of tiny
-dots or edge-clipped slivers cannot set the element's font height when taller
-words pass that threshold. Shared metrics reduce line splitting from uneven handwriting
-baselines, punctuation heights and font sizes. Each word retains its horizontal
-placement except consecutive boxes at the same x, which share the available
-width with a positive gap. For distinct x positions, Cairo reserves half an em
-before the next word; Apple reserves half the line band height. Horizontal fitting may extend into
-the original quarter-height search tolerance. Vertical selection bounds follow
-the common line band, clamped to the page. Its centre is chosen within the
-original unclipped boxes at least as tall as the physical run's median height. Smaller boxes
-contribute to the existing 0.24-box-height tolerance window without constraining
-that strict centre intersection; disjoint punctuation and short words can share
-a band. A page-edge sliver cannot constrain a full band. Lines whose full-height
-boxes are vertically disjoint use the local geometric fallback below.
+and the element uses a common height based on clipped word boxes. A gap
+greater than 1.4× between successive sorted heights separates groups. Starting
+with the tallest group, discard it if every box exceeds half the page height
+and the shorter boxes outnumber it. Two boxes taller than half a page must
+overlap vertically. Repeat until a group is retained. A chain of gradually
+increasing heights with no such gap can still raise the element height.
+
+Among the remaining boxes, exclude the tallest once if it exceeds 1.4 times
+the runner-up. Average the heights, then use only boxes at least a quarter of
+that mean to compute the final height. Tiny punctuation and edge-clipped
+slivers below this threshold cannot set the height even when they outnumber
+the words. Cap the included mean at 1.4 times the included minimum, with a
+floor of half the included mean. Shared metrics reduce line splitting from
+uneven handwriting baselines, punctuation heights and font sizes. Each word
+retains its horizontal placement except consecutive boxes at the same x, which
+share the available width with a positive gap. For distinct x positions,
+Cairo reserves half an em before the next word and Apple reserves half the
+line band height. Horizontal fitting may extend into the original quarter-height
+search tolerance. Vertical selection bounds follow the common line band,
+clamped to the page. In a mixed run, only boxes not removed as half-page
+groups determine the preferred centre, median and vertical windows. A run
+containing only boxes from removed groups uses its own boxes for all three.
+Unclipped boxes at least as tall as the run median constrain the centre to their
+intersection. Smaller boxes contribute to the tolerance windows, so disjoint
+punctuation and short words can share a band. A page-edge sliver cannot
+constrain a full band. Lines whose full-height boxes are vertically disjoint
+use the local geometric fallback below.
 When needed, a band can grow up to the run's median height to keep small-box
 centres within a quarter-line margin while retaining the normal-word overlap.
 If fitting the band to the page would move its centre outside that overlap,
 the band shrinks instead.
-A leftward move within a model line starts a new physical
-band, preserving word order across wraps.
+A leftward move within a model line starts a new physical band, including
+when the word moving left belongs to a removed half-page group.
 Tests check Poppler and, on macOS, PDFKit extraction order, phrase search, and
 local word rectangles. Poppler may expand gaps into multiple spaces, and both
 extractors can insert additional line breaks at physical wraps. Extreme

@@ -82,30 +82,86 @@ invalid:
 /* Recognition separators are words without boxes. Consume their line breaks
  * in model order. A common mean height and baseline keep an uneven handwritten
  * line together in geometric extractors; individual x positions and widths
- * keep word selections local. Exclude a lone tallest box more than 1.4 times
- * the runner-up before averaging boxes at least a quarter of the initial
- * mean, then cap at 1.4 times their minimum with a half-mean floor: even a
- * majority of tiny punctuation or clipped slivers must not collapse the
- * entire element. A literal intersection can collapse the font size and split
- * a line into columns. The 0.24-box margin below leaves room for PDF coordinate
- * rounding within the quarter-box search tolerance. Only boxes at least the
- * run's median height require a strict centre intersection;
- * smaller boxes use the tolerance window above. Disjoint full-height boxes
- * and models without separators retain the bounded fallback below. */
+ * keep word selections local. Read groups of clipped heights from tallest to
+ * shortest, splitting at gaps over 1.4x. Remove a group only if its smallest
+ * box exceeds half the page height (two such boxes must overlap vertically)
+ * and the shorter boxes outnumber it. A graded chain with no such gap can
+ * still raise the height. On the retained boxes, trim a single tallest box
+ * over 1.4x its runner-up, then average heights at least a quarter of the
+ * remaining mean. This keeps majority punctuation or slivers below that
+ * threshold from setting the height. Cap at 1.4x the included minimum with
+ * a half-mean floor.
+ * A literal intersection can collapse the font size and split a line into
+ * columns. The 0.24-box margin below leaves room for PDF coordinate rounding
+ * within the quarter-box search tolerance. In a mixed run, only boxes not
+ * removed as half-page groups supply the median, preferred centre and
+ * vertical windows. All boxes participate in wrap detection. Boxes at
+ * least as tall as that median require a strict centre intersection; smaller
+ * boxes use the tolerance window. Disjoint full-height boxes and models
+ * without separators retain the bounded fallback below. */
 typedef struct {
   size_t end, coincident_end, coincident_slot;
-  double top, bottom, height, normal_height, coincident_x, coincident_pitch;
+  double top, bottom, height, ceiling, normal_height, coincident_x,
+      coincident_pitch;
   bool explicit_lines, valid;
 } snr_text_line;
 static inline bool snr_text_break(sn_string label) {
   return label.data && (memchr(label.data, '\n', label.length) ||
                         memchr(label.data, '\r', label.length));
 }
+/* Four subdivisions per binary exponent keep each bucket's height ratio
+ * at most 1.25, so every gap greater than 1.4 falls between buckets. */
+static inline int snr_text_height_bucket(double h) {
+  int exponent;
+  double fraction = frexp(h, &exponent);
+  return 4 * exponent + (int)(8 * fraction);
+}
+static inline double snr_text_height_ceiling(const sn_element* el, double width,
+                                             double height, double shortest,
+                                             size_t count,
+                                             double* run_ceiling) {
+  /* 64 octaves cover the 1e-6 mm clip floor through the renderer's 2^24
+   * pixel page limit. The fixed array uses 6 KiB of stack on 64-bit targets.
+   * Clamp the index even for larger internal inputs. */
+  enum { BUCKETS = 256 };
+  struct {
+    double min, max;
+    size_t count;
+  } bins[BUCKETS] = {0};
+  int first = snr_text_height_bucket(shortest);
+  int last = 0;
+  for (size_t i = 0; i < el->word_count; i++) {
+    sn_rect r = el->words[i].box;
+    if (!snr_box_clip(&r, width, height)) continue;
+    int bin = snr_text_height_bucket(r.height) - first;
+    if (bin >= BUCKETS) bin = BUCKETS - 1;
+    if (bin > last) last = bin;
+    if (!bins[bin].count || r.height < bins[bin].min) bins[bin].min = r.height;
+    bins[bin].max = fmax(bins[bin].max, r.height);
+    bins[bin].count++;
+  }
+  double group_min = *run_ceiling;
+  size_t group = 0;
+  for (int i = last; i >= 0; i--) {
+    if (!bins[i].count) continue;
+    if (group_min > bins[i].max * 1.4) {
+      size_t shorter = count - group;
+      if (group >= shorter || group_min <= height / 2)
+        return group == 1 ? bins[i].max : *run_ceiling;
+      count = shorter;
+      group = 0;
+      *run_ceiling = bins[i].max;
+    }
+    group += bins[i].count;
+    group_min = bins[i].min;
+  }
+  return *run_ceiling;
+}
 static inline snr_text_line snr_text_line_create(const sn_element* el,
                                                  double width, double height) {
   snr_text_line line = {0};
   size_t count = 0;
-  double tallest = 0, runner_up = 0;
+  double shortest = height, tallest = 0, runner_up = 0;
   for (size_t j = 0; j < el->word_count; j++) {
     const sn_word* word = el->words + j;
     if (word->box.is_null && word->label.data && word->label.length &&
@@ -114,6 +170,7 @@ static inline snr_text_line snr_text_line_create(const sn_element* el,
       line.explicit_lines = true;
     sn_rect r = word->box;
     if (snr_box_clip(&r, width, height)) {
+      shortest = fmin(shortest, r.height);
       if (r.height > tallest) {
         runner_up = tallest;
         tallest = r.height;
@@ -124,11 +181,14 @@ static inline snr_text_line snr_text_line_create(const sn_element* el,
     }
   }
   if (count) {
-    /* Trim an isolated upper outlier before it can raise the quarter-mean
-     * threshold above every ordinary word. Two tall words still support the
-     * height when the remaining boxes are mostly punctuation or slivers. */
+    /* Only removal of a half-page group lowers the run ceiling. The extra
+     * lone-tallest trim applies to the element height calculation alone. */
+    line.ceiling = tallest;
     double ceiling =
         count > 1 && tallest > runner_up * 1.4 ? runner_up : tallest;
+    if (tallest > height / 2 && tallest > shortest * 1.4)
+      ceiling = snr_text_height_ceiling(el, width, height, shortest, count,
+                                        &line.ceiling);
     count = 0;
     for (size_t j = 0; j < el->word_count; j++) {
       sn_rect r = el->words[j].box;
@@ -189,11 +249,11 @@ static inline void snr_text_line_box(snr_text_line* line, const sn_element* el,
   if (index >= line->end) {
     line->valid = false;
     size_t end = index;
-    double centers = 0, top = 0, bottom = height;
+    double centers = 0, ordinary_centers = 0, top = 0, bottom = height;
     double center_top = 0, center_bottom = height;
     double small_top = 0, small_bottom = height;
     double previous_x = -1;
-    size_t count = 0;
+    size_t count = 0, ordinary = 0;
     for (; end < el->word_count; end++) {
       const sn_word* word = el->words + end;
       if (word->box.is_null && snr_text_break(word->label)) break;
@@ -203,10 +263,20 @@ static inline void snr_text_line_box(snr_text_line* line, const sn_element* el,
        * new physical band on a leftward move, retaining the stored sequence. */
       if (previous_x >= 0 && r.x < previous_x) break;
       previous_x = r.x;
-      top = fmax(top, r.y - r.height * 0.24);
-      bottom = fmin(bottom, r.y + r.height * 1.24);
-      centers += r.y + r.height / 2;
+      double center = r.y + r.height / 2;
+      centers += center;
+      if (r.height <= line->ceiling) {
+        ordinary_centers += center;
+        ordinary++;
+      }
       count++;
+    }
+    /* The retained heights form the sorted prefix, so its median rank also
+     * selects the right height in the full run. A tall-only run uses all its
+     * own boxes for both the centre and the median. */
+    if (ordinary) {
+      centers = ordinary_centers;
+      count = ordinary;
     }
     line->normal_height =
         count ? snr_text_median_height(el, index, end, count, width, height)
@@ -214,10 +284,14 @@ static inline void snr_text_line_box(snr_text_line* line, const sn_element* el,
     for (size_t j = index; j < end; j++) {
       const sn_word* word = el->words + j;
       sn_rect r = word->box;
+      if (!snr_box_clip(&r, width, height) ||
+          (ordinary && r.height > line->ceiling))
+        continue;
+      top = fmax(top, r.y - r.height * 0.24);
+      bottom = fmin(bottom, r.y + r.height * 1.24);
       /* Small handwriting and punctuation use the tolerance window above.
        * Page-edge slivers cannot constrain the centre of a full band. */
-      if (snr_box_clip(&r, width, height) && word->box.y >= 0 &&
-          word->box.y <= height - word->box.height) {
+      if (word->box.y >= 0 && word->box.y <= height - word->box.height) {
         if (r.height >= line->normal_height) {
           center_top = fmax(center_top, r.y + r.height * 0.01);
           center_bottom = fmin(center_bottom, r.y + r.height * 0.99);
