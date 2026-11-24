@@ -90,20 +90,25 @@ static int fixture(const char* pdf, const char* labels) {
   return ok ? 0 : 1;
 }
 
-static bool recognition_order(void) {
-  sn_recognition recognition = {.elements = &order_element, .element_count = 1};
+static PopplerDocument* render_element(const sn_element* element) {
+  sn_recognition recognition = {.elements = element, .element_count = 1};
   sn_page page = {
       .number = 1, .size = {1404, 1872}, .recognition = &recognition};
   sn_notebook notebook = {.pages = &page, .page_count = 1};
   snr_options options = snr_options_default();
   options.scale = 0.0625;
   snr_buffer pdf = {0};
-  if (snr_page_pdf(&notebook, 0, &options, &pdf, nullptr)) return false;
+  if (snr_page_pdf(&notebook, 0, &options, &pdf, nullptr)) return nullptr;
   GBytes* bytes = g_bytes_new(pdf.bytes, pdf.size);
   PopplerDocument* document =
       poppler_document_new_from_bytes(bytes, nullptr, nullptr);
   g_bytes_unref(bytes);
   snr_buffer_free(&pdf);
+  return document;
+}
+
+static bool recognition_order(void) {
+  PopplerDocument* document = render_element(&order_element);
   if (!document) return false;
   PopplerPage* sheet = poppler_document_get_page(document, 0);
   char* text = poppler_page_get_text(sheet);
@@ -148,10 +153,56 @@ static bool recognition_order(void) {
   return ok;
 }
 
+static bool tall_word_bands(void) {
+  sn_word words[] = {{{"One", 3}, {6, 32, 12, 6, false}},
+                     {{"Two", 3}, {25, 32, 12, 6, false}},
+                     {{"Three", 5}, {44, 32, 14, 6, false}},
+                     {{"\n", 1}, {.is_null = true}},
+                     {{"Four", 4}, {6, 53, 12, 6, false}},
+                     {{"Five", 4}, {25, 53, 12, 6, false}},
+                     {{"Six", 3}, {44, 53, 14, 6, false}},
+                     {{"\n", 1}, {.is_null = true}},
+                     {{"Seven", 5}, {68, 0, 14, 150, false}},
+                     {{"Eight", 5}, {91, 0, 14, 150, false}}};
+  PopplerRectangle control[7] = {0};
+  bool ok = true;
+  for (int variant = 0; variant < 3; variant++) {
+    sn_element el = {.words = words, .word_count = variant ? 10 : 7};
+    if (variant == 2) words[7].label = (sn_string){" ", 1};
+    PopplerDocument* document = render_element(&el);
+    if (!document) return false;
+    PopplerPage* page = poppler_document_get_page(document, 0);
+    for (size_t i = 0; i < el.word_count; i++) {
+      if (words[i].box.is_null) continue;
+      GList* matches = poppler_page_find_text_with_options(
+          page, words[i].label.data, POPPLER_FIND_WHOLE_WORDS_ONLY);
+      bool found = matches && !matches->next;
+      if (found) {
+        PopplerRectangle r = *(PopplerRectangle*)matches->data;
+        double h = r.y2 - r.y1;
+        found = h > 0 && fabs(h - 6 * 72 / 25.4) < 0.1;
+        if (!variant)
+          control[i] = r;
+        else if (i < 7)
+          found &= fabs(r.y1 - control[i].y1) < 0.1 &&
+                   fabs(r.y2 - control[i].y2) < 0.1;
+      }
+      if (!found)
+        fprintf(stderr, "tall box PDF variant %d: %s band\n", variant,
+                words[i].label.data);
+      ok &= found;
+      g_list_free_full(matches, (GDestroyNotify)poppler_rectangle_free);
+    }
+    g_object_unref(page);
+    g_object_unref(document);
+  }
+  return ok;
+}
+
 int main(int argc, char** argv) {
   if (argc == 3) return fixture(argv[1], argv[2]);
 
-  if (!recognition_order()) return 1;
+  if (!recognition_order() || !tall_word_bands()) return 1;
 
   sn_word words[] = {{{"Searchable", 10}, {20, 30, 40, 10, false}},
                      {{"phrase", 6}, {62, 30, 30, 10, false}},
